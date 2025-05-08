@@ -25,6 +25,7 @@ const deviceSetup = async () => {
   deviceButton.disabled = true;
   createProdButton.disabled = false;
   createConsButton.disabled = false;
+  disconnectButton.disabled = false;
 };
 
 const createProducer = async () => {
@@ -148,7 +149,7 @@ const consume = async () => {
   } else {
     consumer = await consumerTransport.consume(consumerParams);
     const { track } = consumer;
-    
+
     console.log("The Track Is Live:", track);
     track.addEventListener("ended", () => {
       console.log("Track has ended");
@@ -164,6 +165,16 @@ const consume = async () => {
 
     remoteVideo.srcObject = new MediaStream([track]);
     await socket.emitWithAck("unpauseConsumer");
+  }
+};
+
+const disconnect = async () => {
+  const closedResp = await socket.emitWithAck("close-all");
+  producerTransport?.close();
+  consumerTransport?.close();
+
+  if (closedResp == "errorClosing") {
+    console.log("error closing");
   }
 };
 

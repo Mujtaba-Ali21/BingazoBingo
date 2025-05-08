@@ -22,7 +22,7 @@ const createWorkers = require("./createWorkers");
 const createWebRtcTransportBothKinds = require("./createWebRtcTransportBothKinds");
 
 const io = socketio(httpsServer, {
-  cors: [`https://localhost:${config.port}`],
+  cors: [`https://192.168.1.40:${config.port}`],
 });
 
 let workers = null;
@@ -75,6 +75,10 @@ io.on("connection", (socket) => {
         rtpParameters,
       });
       theProducer = thisClientProducer;
+      thisClientProducer.on("transportclose", () => {
+        console.log("Producer Transport Closed");
+        thisClientConsumer.close();
+      });
       ack(thisClientProducer.id);
     } catch (error) {
       console.log(error);
@@ -99,10 +103,12 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("consume-media", async ({rtpCapabilities}, ack) => {
+  socket.on("consume-media", async ({ rtpCapabilities }, ack) => {
     if (!theProducer) {
       ack("noProducer");
-    } else if (!router.canConsume({producerId: theProducer.id, rtpCapabilities})){
+    } else if (
+      !router.canConsume({ producerId: theProducer.id, rtpCapabilities })
+    ) {
       ack("cannotConsume");
     } else {
       thisClientConsumer = await thisClientConsumerTransport.consume({
@@ -117,13 +123,29 @@ io.on("connection", (socket) => {
         kind: thisClientConsumer.kind,
         rtpParameters: thisClientConsumer.rtpParameters,
       };
+
+      thisClientConsumer.on("transportclose", () => {
+        console.log("Consumer Transport Closed");
+        thisClientConsumer.close();
+      });
+
       ack(consumerParams);
     }
-  })
+  });
 
- socket.on("unpauseConsumer", async (ack) => {
-   await thisClientConsumer.resume();
- });
+  socket.on("unpauseConsumer", async (ack) => {
+    await thisClientConsumer.resume();
+  });
+
+  socket.on("close-all", (ack) => {
+    try {
+      thisClientConsumerTransport?.close();
+      thisClientProducerTransport?.close();
+      ack("closed");
+    } catch (error) {
+      ack("errorClosing");
+    }
+  });
 });
 
 httpsServer.listen(config.port);
