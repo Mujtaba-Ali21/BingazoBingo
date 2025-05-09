@@ -1,3 +1,5 @@
+// script.js
+
 // Globals
 let socket = null;
 let device = null;
@@ -9,178 +11,159 @@ let producer = null;
 let consumerTransport = null;
 let consumer = null;
 
-// Connect To The Server
-const initConnect = () => {
-  socket = io("https://localhost:3030");
-  connectButton.innerHTML = "Connecting...";
-  connectButton.disabled = true;
-  addSocketListeners();
+// Connect to socket.io server
+const connectSocket = () => {
+  socket = io("https://192.168.1.40:3030"); // Update IP as needed
+
+  socket.on("connect", () => {
+    console.log("Socket connected");
+    publishButton.disabled = false;
+    consumeButton.disabled = false;
+  });
 };
 
-const deviceSetup = async () => {
-  device = new mediasoupClient.Device();
-  const routerRtpCapabilities = await socket.emitWithAck("getRtpCap");
-  await device.load({ routerRtpCapabilities });
-  deviceButton.innerHTML = "Device Created";
-  deviceButton.disabled = true;
-  createProdButton.disabled = false;
-  createConsButton.disabled = false;
-  disconnectButton.disabled = false;
+connectSocket(); // Connect immediately
+
+// Device setup (runs automatically if needed)
+const ensureDevice = async () => {
+  if (!device) {
+    device = new mediasoupClient.Device();
+    const routerRtpCapabilities = await socket.emitWithAck("getRtpCap");
+    await device.load({ routerRtpCapabilities });
+  }
 };
 
-const createProducer = async () => {
+// ----------------------------------------
+// Broadcaster flow
+// ----------------------------------------
+
+const publish = async () => {
+  publishButton.disabled = true;
+
+  await ensureDevice();
+
+  // Get media
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
       video: true,
       audio: true,
     });
     localVideo.srcObject = localStream;
-  } catch (error) {
-    console.log("GUM Error", error);
+  } catch (err) {
+    console.error("getUserMedia error", err);
+    return;
   }
 
-  // Ask The Socket.io (Signaling) For Transport Information
+  // Create transport
   const data = await socket.emitWithAck("create-producer-transport");
 
-  const { id, iceParameters, iceCandidates, dtlsParameters } = data;
-
-  const transport = device.createSendTransport({
-    id,
-    iceParameters,
-    iceCandidates,
-    dtlsParameters,
-  });
-
-  producerTransport = transport;
+  producerTransport = device.createSendTransport(data);
 
   producerTransport.on(
     "connect",
     async ({ dtlsParameters }, callback, errback) => {
-      const resp = await socket.emitWithAck("connect-transport", {
+      const res = await socket.emitWithAck("connect-transport", {
         dtlsParameters,
       });
-
-      if (resp == "success") {
-        callback();
-      } else if (resp == "error") {
-        errback();
-      }
+      res === "success" ? callback() : errback();
     }
   );
 
-  producerTransport.on("produce", async (parameters, callback, errback) => {
-    const { kind, rtpParameters } = parameters;
-    const resp = await socket.emitWithAck("start-producing", {
-      kind,
-      rtpParameters,
-    });
-
-    if (resp == "error") {
-      errback();
-    } else {
-      callback({ id: resp });
+  producerTransport.on(
+    "produce",
+    async ({ kind, rtpParameters }, callback, errback) => {
+      const id = await socket.emitWithAck("start-producing", {
+        kind,
+        rtpParameters,
+      });
+      typeof id === "string" ? callback({ id }) : errback();
     }
+  );
 
-    publishButton.disabled = true;
-    createConsButton.disabled = false;
-  });
-
-  createProdButton.disabled = true;
-  publishButton.disabled = false;
-};
-
-const publish = async () => {
   const track = localStream.getVideoTracks()[0];
   producer = await producerTransport.produce({ track });
+
+  broadcasterDisconnectButton.disabled = false;
 };
 
-const createConsumer = async () => {
-  // Ask The Socket.io (Signaling) For Transport Information
+const disconnectBroadcaster = async () => {
+  try {
+    await socket.emitWithAck("close-all");
+
+    if (producerTransport) producerTransport.close();
+    if (producer) producer.close();
+    if (localStream) {
+      localStream.getTracks().forEach((t) => t.stop());
+      localStream = null;
+    }
+
+    producerTransport = null;
+    producer = null;
+
+    publishButton.disabled = false;
+    broadcasterDisconnectButton.disabled = true;
+    localVideo.srcObject = null;
+  } catch (err) {
+    console.error("Error during broadcaster disconnect", err);
+  }
+};
+
+// ----------------------------------------
+// Consumer flow
+// ----------------------------------------
+
+const consume = async () => {
+  consumeButton.disabled = true;
+
+  await ensureDevice();
+
   const data = await socket.emitWithAck("create-consumer-transport");
 
-  const { id, iceParameters, iceCandidates, dtlsParameters } = data;
-
-  const transport = device.createRecvTransport({
-    id,
-    iceParameters,
-    iceCandidates,
-    dtlsParameters,
-  });
-
-  consumerTransport = transport;
-
-  consumerTransport.on("connectionstatechange", (state) => {
-    console.log("....Connection State Change....");
-    console.log(state);
-  });
-  consumerTransport.on("icegatheringstatechange", (state) => {
-    console.log("....ICE Gathering Change....");
-    console.log(state);
-  });
+  consumerTransport = device.createRecvTransport(data);
 
   consumerTransport.on(
     "connect",
     async ({ dtlsParameters }, callback, errback) => {
-      const resp = await socket.emitWithAck("connect-consumer-transport", {
+      const res = await socket.emitWithAck("connect-consumer-transport", {
         dtlsParameters,
       });
-
-      if (resp == "success") {
-        callback();
-      } else if (resp == "error") {
-        errback();
-      }
+      res === "success" ? callback() : errback();
     }
   );
 
-  createConsButton.disabled = true;
-  consumeButton.disabled = false;
-};
-
-const consume = async () => {
   const consumerParams = await socket.emitWithAck("consume-media", {
     rtpCapabilities: device.rtpCapabilities,
   });
 
-  if (consumerParams == "noProducer") {
-    console.log("there is no producer");
-  } else if (consumerParams == "cannotConsume") {
-    console.log("cannot consume");
-  } else {
-    consumer = await consumerTransport.consume(consumerParams);
-    const { track } = consumer;
-
-    console.log("The Track Is Live:", track);
-    track.addEventListener("ended", () => {
-      console.log("Track has ended");
-    });
-
-    track.onmute = (event) => {
-      console.log("Track has muted");
-    };
-
-    track.onunmute = (event) => {
-      console.log("Track has unmuted");
-    };
-
-    remoteVideo.srcObject = new MediaStream([track]);
-    await socket.emitWithAck("unpauseConsumer");
+  if (consumerParams === "noProducer" || consumerParams === "cannotConsume") {
+    console.log("No producer or cannot consume");
+    return;
   }
+
+  consumer = await consumerTransport.consume(consumerParams);
+
+  const stream = new MediaStream([consumer.track]);
+  remoteVideo.srcObject = stream;
+
+  await socket.emitWithAck("unpauseConsumer");
+
+  consumerDisconnectButton.disabled = false;
 };
 
-const disconnect = async () => {
-  const closedResp = await socket.emitWithAck("close-all");
-  producerTransport?.close();
-  consumerTransport?.close();
+const disconnectConsumer = async () => {
+  try {
+    await socket.emitWithAck("close-consumer");
 
-  if (closedResp == "errorClosing") {
-    console.log("error closing");
+    if (consumerTransport) consumerTransport.close();
+    if (consumer) consumer.close();
+
+    consumerTransport = null;
+    consumer = null;
+
+    consumeButton.disabled = false;
+    consumerDisconnectButton.disabled = true;
+    remoteVideo.srcObject = null;
+  } catch (err) {
+    console.error("Error during consumer disconnect", err);
   }
 };
-
-function addSocketListeners() {
-  socket.on("connect", () => {
-    connectButton.innerHTML = "Connected";
-    deviceButton.disabled = false;
-  });
-}
